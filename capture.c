@@ -24,15 +24,8 @@
 #include <sys/ioctl.h>
 
 #include <linux/videodev2.h>
-#include <linux/uvcvideo.h>
-
-#include "uvch264.h"
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
-
-#ifndef V4L2_PIX_FMT_H264
-#define V4L2_PIX_FMT_H264     v4l2_fourcc('H', '2', '6', '4') /* H264 with start codes */
-#endif
 
 enum io_method {
 	IO_METHOD_READ,
@@ -51,10 +44,8 @@ static int fd = -1;
 struct buffer          *buffers;
 static unsigned int n_buffers;
 static int out_buf;
-static int force_format;
 static int frame_count = -1;
 static int frame_number = 0;
-static int bitrate = 100; // kbps
 
 
 static void errno_exit(const char *s)
@@ -72,87 +63,6 @@ static int xioctl(int fh, int request, void *arg)
 	} while (-1 == r && EINTR == errno);
 
 	return r;
-}
-
-static void set_bitrate(int bmin)
-{
-  int bmax = bmin;
-  int res;
-  struct uvc_xu_control_query ctrl;
-  uvcx_bitrate_layers_t  conf;
-  ctrl.unit = 12;
-  ctrl.size = 10;
-  ctrl.selector = UVCX_BITRATE_LAYERS;
-  ctrl.data = &conf;
-  ctrl.query = UVC_GET_CUR;
-  conf.wLayerID = 0;
-  conf.dwPeakBitrate = conf.dwAverageBitrate = 0;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res)
-    {
-      perror("ctrl_query");
-      return;
-    }
-  //  fprintf(stderr, "get before br %d %d\n", conf.dwPeakBitrate, conf.dwAverageBitrate);
-  conf.dwPeakBitrate = bmax;
-  conf.dwAverageBitrate = bmin;
-  ctrl.query = UVC_SET_CUR;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res)
-    {
-      perror("ctrl_query");
-      return;
-    }
-  //  fprintf(stderr, "set br %d %d\n", conf.dwPeakBitrate, conf.dwAverageBitrate);
-  ctrl.query = UVC_GET_CUR;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res)
-    {
-      perror("ctrl_query");
-      return;
-    }
-  //  fprintf(stderr, "get after br %d %d\n", conf.dwPeakBitrate, conf.dwAverageBitrate);
-}
-
-static void setRCMode(int mode)
-{
-  int res;
-  struct uvc_xu_control_query ctrl;
-  uvcx_rate_control_mode_t conf;
-  ctrl.selector = UVCX_RATE_CONTROL_MODE;
-  ctrl.size = 3;
-  ctrl.unit = 12;
-  ctrl.data = &conf;
-  ctrl.query = UVC_GET_CUR;
-  conf.wLayerID = 0;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res) { perror("query"); return;}
-  //fprintf(stderr, "mode %d\n", (int)conf.bRateControlMode);
-  conf.bRateControlMode = mode;
-  ctrl.query = UVC_SET_CUR;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res) { perror("query"); return;}
-  //fprintf(stderr, "mode %d\n", (int)conf.bRateControlMode);
-  ctrl.query = UVC_GET_CUR;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
-  if (res) { perror("query"); return;}
-  //fprintf(stderr, "mode %d\n", (int)conf.bRateControlMode);
-}
-
-
-void setNextFrame(int frame)
-{
-  int res;
-  struct uvc_xu_control_query ctrl;
-  uvcx_picture_type_control_t conf;
-  ctrl.selector = UVCX_PICTURE_TYPE_CONTROL;
-  ctrl.size = 4;
-  ctrl.unit = 12;
-  ctrl.data = &conf;
-  conf.wLayerID = 0;
-  conf.wPicType = frame;
-  ctrl.query = UVC_SET_CUR;
-  res = xioctl(fd, UVCIOC_CTRL_QUERY, &ctrl);
 }
 
 static void process_image(const void *p, int size)
@@ -274,9 +184,6 @@ static void mainloop(void)
 	unsigned int count;
 
 	count = frame_count;
-
-	//	setRCMode(RATECONTROL_CBR);
-	//	set_bitrate(bitrate / 8);
 
 	while (count < 0 || count-- > 0) {
 		for (;; ) {
@@ -588,22 +495,9 @@ static void init_device(void)
 	CLEAR(fmt);
 
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (force_format) {
-	        //fprintf(stderr, "Set H264\r\n");
-		fmt.fmt.pix.width       = 1280; //replace
-		fmt.fmt.pix.height      = 720; //replace
-		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_H264; //replace
-		fmt.fmt.pix.field       = V4L2_FIELD_ANY;
-
-		if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt))
-			errno_exit("VIDIOC_S_FMT");
-
-		/* Note VIDIOC_S_FMT may change width and height. */
-	} else {
-		/* Preserve original settings as set by v4l2-ctl for example */
-		if (-1 == xioctl(fd, VIDIOC_G_FMT, &fmt))
-			errno_exit("VIDIOC_G_FMT");
-	}
+	/* Preserve original settings as set by v4l2-ctl for example */
+	if (-1 == xioctl(fd, VIDIOC_G_FMT, &fmt))
+		errno_exit("VIDIOC_G_FMT");
 
 	/* Buggy driver paranoia. */
 	min = fmt.fmt.pix.width * 2;
@@ -672,11 +566,9 @@ static void usage(FILE *fp, int argc, char **argv)
 	        "-r | --read          Use read() calls\n"
 	        "-u | --userp         Use application allocated buffers\n"
 	        "-o | --output        Outputs stream to stdout\n"
-	        "-f | --format        Force format to 1280x720 H264\n"
 	        "-c | --count         Number of frames to grab [%i]\n"
-	        "-b | --bitrate       Set bitrate [%i] kbps\n"
 	        "",
-	        argv[0], dev_name, frame_count, bitrate);
+	        argv[0], dev_name, frame_count);
 }
 
 static const char short_options[] = "d:hmruofc:b:";
@@ -689,9 +581,7 @@ static const struct option
 	{ "read",    no_argument,       NULL, 'r' },
 	{ "userp",   no_argument,       NULL, 'u' },
 	{ "output",  no_argument,       NULL, 'o' },
-	{ "format",  no_argument,       NULL, 'f' },
 	{ "count",   required_argument, NULL, 'c' },
-	{ "bitrate", required_argument, NULL, 'b' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -737,20 +627,9 @@ int main(int argc, char **argv)
 			out_buf++;
 			break;
 
-		case 'f':
-			force_format++;
-			break;
-
 		case 'c':
 			errno = 0;
 			frame_count = strtol(optarg, NULL, 0);
-			if (errno)
-				errno_exit(optarg);
-			break;
-
-		case 'b':
-			errno = 0;
-			bitrate = strtol(optarg, NULL, 0);
 			if (errno)
 				errno_exit(optarg);
 			break;
